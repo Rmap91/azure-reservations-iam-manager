@@ -1,0 +1,41 @@
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Azure CLI cache
+.azure/
+
+# PowerShell execution policy files
+*.ps1xml
+
+# Backup files
+*.bak
+*.backup
+
+# Personal notes (optional)
+personal-notes.md
+test-*
+
+# Sensitive information
+*.credentials
+*.secrets
+config.local.*
