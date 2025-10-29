@@ -70,25 +70,87 @@ function Get-AllReservations {
     Write-ColoredOutput "Retrieving all Azure reservations..." $Colors.Info
     
     try {
-        # Get all reservations using Azure CLI with extended properties
-        $reservationsJson = az reservations reservation list --query "[].{id:id,name:name,provisioningState:provisioningState,reservedResourceType:reservedResourceType,skuName:skuName,quantity:quantity,term:term,effectiveDateTime:effectiveDateTime,expiryDateTime:expiryDateTime,instanceFlexibility:instanceFlexibility}" --output json
+        # Method 1: Try to get reservation orders first (preferred method)
+        Write-ColoredOutput "Attempting to get reservation orders..." $Colors.Info
+        $reservationOrdersJson = az reservations reservation-order list --output json 2>/dev/null
         
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to retrieve reservations"
+        if ($LASTEXITCODE -eq 0 -and $reservationOrdersJson) {
+            $reservationOrders = $reservationOrdersJson | ConvertFrom-Json
+            
+            if ($reservationOrders.Count -gt 0) {
+                Write-ColoredOutput "Found $($reservationOrders.Count) reservation order(s), getting individual reservations..." $Colors.Info
+                
+                $allReservations = @()
+                
+                # Get reservations for each order
+                foreach ($order in $reservationOrders) {
+                    try {
+                        Write-ColoredOutput "  Processing order: $($order.name)" $Colors.Info
+                        $reservationsJson = az reservations reservation list --reservation-order-id $order.name --output json 2>/dev/null
+                        
+                        if ($LASTEXITCODE -eq 0 -and $reservationsJson) {
+                            $reservations = $reservationsJson | ConvertFrom-Json
+                            foreach ($reservation in $reservations) {
+                                # Add order information to each reservation
+                                $reservation | Add-Member -MemberType NoteProperty -Name "orderName" -Value $order.name -Force
+                                $reservation | Add-Member -MemberType NoteProperty -Name "orderDisplayName" -Value $order.displayName -Force
+                                $allReservations += $reservation
+                            }
+                        }
+                    }
+                    catch {
+                        Write-ColoredOutput "  Warning: Could not retrieve reservations for order $($order.name)" $Colors.Warning
+                    }
+                }
+                
+                if ($allReservations.Count -gt 0) {
+                    Write-ColoredOutput "Found $($allReservations.Count) reservation(s) total" $Colors.Success
+                    return $allReservations
+                }
+            }
         }
         
-        $reservations = $reservationsJson | ConvertFrom-Json
-        
-        if ($reservations.Count -eq 0) {
-            Write-ColoredOutput "No reservations found in accessible subscriptions." $Colors.Warning
-            return @()
+        # Method 2: Fallback - try to use Cost Management to find reservations
+        Write-ColoredOutput "Trying alternative method via Cost Management..." $Colors.Info
+        try {
+            # Get current subscription
+            $currentSubJson = az account show --output json 2>/dev/null
+            if ($LASTEXITCODE -eq 0 -and $currentSubJson) {
+                $currentSub = $currentSubJson | ConvertFrom-Json
+                Write-ColoredOutput "Current subscription: $($currentSub.name) ($($currentSub.id))" $Colors.Info
+                
+                # Try to get reservation information via billing/consumption APIs
+                Write-ColoredOutput "Note: Detailed reservation data requires Billing Reader or Cost Management access" $Colors.Warning
+                Write-ColoredOutput "Please ensure you have the appropriate permissions or use the Azure Portal" $Colors.Warning
+            }
+        }
+        catch {
+            Write-ColoredOutput "Could not determine current subscription context" $Colors.Warning
         }
         
-        Write-ColoredOutput "Found $($reservations.Count) reservation(s)" $Colors.Success
-        return $reservations
+        # Method 3: Return empty with helpful guidance
+        Write-ColoredOutput "No reservations found or insufficient permissions." $Colors.Warning
+        Write-ColoredOutput "" 
+        Write-ColoredOutput "Possible reasons:" $Colors.Info
+        Write-ColoredOutput "  1. No reservations exist in accessible subscriptions" $Colors.Info
+        Write-ColoredOutput "  2. Insufficient permissions to read reservations" $Colors.Info
+        Write-ColoredOutput "  3. Reservations are in a different tenant/subscription" $Colors.Info
+        Write-ColoredOutput "" 
+        Write-ColoredOutput "Required permissions:" $Colors.Info
+        Write-ColoredOutput "  - Reservation Reader (or higher) on reservation orders" $Colors.Info
+        Write-ColoredOutput "  - Access to the subscription containing the reservations" $Colors.Info
+        
+        return @()
     }
     catch {
         Write-ColoredOutput "Error retrieving reservations: $($_.Exception.Message)" $Colors.Error
+        Write-ColoredOutput "" 
+        Write-ColoredOutput "Troubleshooting tips:" $Colors.Info
+        Write-ColoredOutput "  1. Verify you're in the correct Azure subscription: az account show" $Colors.Info
+        Write-ColoredOutput "  2. List available subscriptions: az account list" $Colors.Info
+        Write-ColoredOutput "  3. Switch subscription if needed: az account set --subscription <name-or-id>" $Colors.Info
+        Write-ColoredOutput "  4. Check your role assignments in the Azure Portal" $Colors.Info
+        
         throw
     }
 }
@@ -130,29 +192,43 @@ function Get-ReservationDetailedInfo {
             
             try {
                 Write-ColoredOutput "  Getting utilization data for $($Reservation.name)..." $Colors.Info
-                $utilizationJson = az reservations reservation-order-id list-history --reservation-order-id $reservationOrderId --reservation-id $reservationId --filter "properties/usageDate ge '$startDate' and properties/usageDate le '$endDate'" --output json 2>/dev/null
                 
-                if ($LASTEXITCODE -eq 0 -and $utilizationJson) {
-                    $utilizationData = $utilizationJson | ConvertFrom-Json
-                    $detailedInfo.UsageData = $utilizationData
+                # Try to get reservation summaries which may include utilization data
+                $summariesJson = az reservations reservation-order-id list --reservation-order-id $reservationOrderId --output json 2>/dev/null
+                
+                if ($LASTEXITCODE -eq 0 -and $summariesJson) {
+                    $summaries = $summariesJson | ConvertFrom-Json
                     
-                    # Calculate utilization summary
-                    if ($utilizationData -and $utilizationData.Count -gt 0) {
-                        $avgUtilization = ($utilizationData | Measure-Object -Property utilizationPercentage -Average).Average
-                        $maxUtilization = ($utilizationData | Measure-Object -Property utilizationPercentage -Maximum).Maximum
-                        $minUtilization = ($utilizationData | Measure-Object -Property utilizationPercentage -Minimum).Minimum
-                        
+                    # Look for utilization information in the reservation data
+                    $matchingReservation = $summaries | Where-Object { $_.name -eq $reservationId }
+                    
+                    if ($matchingReservation -and $matchingReservation.properties) {
+                        # Try to extract utilization from properties
                         $detailedInfo.UtilizationSummary = [PSCustomObject]@{
-                            AverageUtilization = [math]::Round($avgUtilization, 2)
-                            MaxUtilization = [math]::Round($maxUtilization, 2)
-                            MinUtilization = [math]::Round($minUtilization, 2)
-                            DataPoints = $utilizationData.Count
+                            AverageUtilization = "Data not available via CLI"
+                            MaxUtilization = "Check Azure Portal"
+                            MinUtilization = "for detailed metrics"
+                            DataPoints = "N/A"
                         }
+                    }
+                } else {
+                    Write-ColoredOutput "    Note: Utilization data requires Azure Portal or Cost Management API access" $Colors.Info
+                    $detailedInfo.UtilizationSummary = [PSCustomObject]@{
+                        AverageUtilization = "Not available"
+                        MaxUtilization = "Use Azure Portal"
+                        MinUtilization = "for utilization data"
+                        DataPoints = 0
                     }
                 }
             }
             catch {
                 Write-ColoredOutput "    Warning: Could not retrieve utilization data - $($_.Exception.Message)" $Colors.Warning
+                $detailedInfo.UtilizationSummary = [PSCustomObject]@{
+                    AverageUtilization = "Error retrieving data"
+                    MaxUtilization = "N/A"
+                    MinUtilization = "N/A"
+                    DataPoints = 0
+                }
             }
             
             # Get affected resources using improved discovery
