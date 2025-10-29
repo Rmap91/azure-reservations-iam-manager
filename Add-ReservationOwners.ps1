@@ -128,7 +128,14 @@ function Show-Help {
     Write-Host "  -ShowCurrentOwners       Display current owners only"
     Write-Host "  -Help                    Show this help"
     Write-Host ""
+    Write-Host "INTERACTIVE MODE:" -ForegroundColor Yellow
+    Write-Host "  Run without parameters for interactive prompts:"
+    Write-Host "  ./Add-ReservationOwners.ps1"
+    Write-Host ""
     Write-Host "EXAMPLES:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  # Interactive mode - script will prompt for user/group"
+    Write-Host "  ./Add-ReservationOwners.ps1"
     Write-Host ""
     Write-Host "  # Add user as owner to all reservations"
     Write-Host "  ./Add-ReservationOwners.ps1 -UserEmail 'john.doe@company.com'"
@@ -368,6 +375,50 @@ function Add-OwnerToReservation {
     }
 }
 
+function Get-UserOrGroupToAdd {
+    Write-Header "ADD NEW OWNER TO RESERVATIONS"
+    
+    do {
+        Write-ColoredOutput "Please specify the user or group to add as Owner:" $Colors.Info
+        Write-ColoredOutput "You can provide:" $Colors.Info
+        Write-ColoredOutput "  - User Principal Name (e.g., user@domain.com)" $Colors.Info
+        Write-ColoredOutput "  - Group name or display name" $Colors.Info
+        Write-ColoredOutput "  - Object ID (GUID)" $Colors.Info
+        Write-Host ""
+        
+        $principal = Read-Host "Enter user/group identifier"
+        
+        if ([string]::IsNullOrWhiteSpace($principal)) {
+            Write-ColoredOutput "Please provide a valid user or group identifier." $Colors.Warning
+            continue
+        }
+        
+        # Validate the principal exists
+        Write-ColoredOutput "Validating principal: $principal" $Colors.Info
+        
+        $resolvedPrincipal = Resolve-Principal -Identifier $principal
+        
+        if ($resolvedPrincipal) {
+            Write-ColoredOutput "Found: $($resolvedPrincipal.displayName) ($($resolvedPrincipal.principalType))" $Colors.Success
+            Write-ColoredOutput "Object ID: $($resolvedPrincipal.id)" $Colors.Success
+            
+            $confirm = Read-Host "Add this $($resolvedPrincipal.principalType.ToLower()) as Owner to reservations? (y/N)"
+            if ($confirm -match "^[Yy]") {
+                return $resolvedPrincipal
+            }
+        } else {
+            Write-ColoredOutput "Could not find user or group: $principal" $Colors.Error
+            Write-ColoredOutput "Please verify the identifier is correct." $Colors.Warning
+        }
+        
+        $retry = Read-Host "Try again? (Y/n)"
+        if ($retry -match "^[Nn]") {
+            return $null
+        }
+        
+    } while ($true)
+}
+
 function Export-Results {
     param(
         [array]$Results,
@@ -449,14 +500,13 @@ function Main {
         } elseif ($PrincipalId) {
             $principal = Resolve-Principal -Identifier $PrincipalId
         } else {
-            Write-ColoredOutput "No principal specified. Use -UserEmail, -GroupName, or -PrincipalId" $Colors.Error
-            Write-ColoredOutput "Or use -ShowCurrentOwners to view existing permissions" $Colors.Info
-            Write-ColoredOutput "Use -Help for detailed usage information" $Colors.Info
-            return
+            # Interactive mode - prompt user for input
+            Write-ColoredOutput "No principal specified via parameters. Entering interactive mode..." $Colors.Info
+            $principal = Get-UserOrGroupToAdd
         }
         
         if (-not $principal) {
-            Write-ColoredOutput "Could not resolve the specified principal. Please verify the identifier." $Colors.Error
+            Write-ColoredOutput "Operation cancelled or could not resolve principal." $Colors.Warning
             return
         }
         
