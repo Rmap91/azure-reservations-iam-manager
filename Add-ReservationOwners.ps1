@@ -155,6 +155,7 @@ function Show-Help {
     Write-Host "FEATURES:" -ForegroundColor Yellow
     Write-Host "  ✓ Automatic reservation discovery across subscriptions"
     Write-Host "  ✓ Principal validation (users and groups)"
+    Write-Host "  ✓ Smart duplicate detection - skips if already Owner"
     Write-Host "  ✓ Current owner analysis and display"
     Write-Host "  ✓ Selective or bulk assignment"
     Write-Host "  ✓ Role assignment verification"
@@ -329,6 +330,30 @@ function Resolve-Principal {
     }
 }
 
+function Check-ExistingOwnerPermission {
+    param(
+        [object]$Reservation,
+        [object]$Principal
+    )
+    
+    try {
+        $currentOwners = Get-ReservationCurrentOwners -Reservation $Reservation
+        
+        # Check if the principal already has Owner permissions
+        $existingOwner = $currentOwners | Where-Object { $_.principalId -eq $Principal.id }
+        
+        if ($existingOwner) {
+            return $true
+        }
+        
+        return $false
+    }
+    catch {
+        Write-ColoredOutput "  Warning: Could not check existing permissions for $($Reservation.name)" $Colors.Warning
+        return $false
+    }
+}
+
 function Add-OwnerToReservation {
     param(
         [object]$Reservation,
@@ -337,6 +362,21 @@ function Add-OwnerToReservation {
     )
     
     try {
+        # First, check if the principal already has Owner permissions
+        $alreadyOwner = Check-ExistingOwnerPermission -Reservation $Reservation -Principal $Principal
+        
+        if ($alreadyOwner) {
+            Write-ColoredOutput "  ℹ Already has Owner permission - skipping" $Colors.Info
+            return [PSCustomObject]@{
+                ReservationName = $Reservation.name
+                Status = "Skipped"
+                Message = "Principal already has Owner permission"
+                PrincipalName = $Principal.displayName
+                PrincipalType = $Principal.principalType
+                Action = "No action needed"
+            }
+        }
+        
         if ($WhatIf) {
             Write-ColoredOutput "  [WHAT-IF] Would add $($Principal.displayName) as Owner" $Colors.Info
             return [PSCustomObject]@{
@@ -345,6 +385,7 @@ function Add-OwnerToReservation {
                 Message = "Would add Owner permission"
                 PrincipalName = $Principal.displayName
                 PrincipalType = $Principal.principalType
+                Action = "Add Owner"
             }
         }
         
@@ -358,6 +399,7 @@ function Add-OwnerToReservation {
                 Message = "Owner permission added"
                 PrincipalName = $Principal.displayName
                 PrincipalType = $Principal.principalType
+                Action = "Added Owner"
             }
         } else {
             throw "Role assignment failed (Exit code: $LASTEXITCODE)"
@@ -371,6 +413,7 @@ function Add-OwnerToReservation {
             Message = $_.Exception.Message
             PrincipalName = $Principal.displayName
             PrincipalType = $Principal.principalType
+            Action = "Add Owner (Failed)"
         }
     }
 }
@@ -438,6 +481,7 @@ function Export-Results {
             Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC"
             ReservationName = $_.ReservationName
             Operation = "Add Owner"
+            Action = $_.Action
             PrincipalName = $_.PrincipalName
             PrincipalType = $_.PrincipalType
             Status = $_.Status
@@ -539,13 +583,28 @@ function Main {
         Write-Header "OPERATION SUMMARY"
         $successCount = ($results | Where-Object { $_.Status -eq "Success" }).Count
         $failCount = ($results | Where-Object { $_.Status -eq "Failed" }).Count
+        $skippedCount = ($results | Where-Object { $_.Status -eq "Skipped" }).Count
         $whatIfCount = ($results | Where-Object { $_.Status -eq "WhatIf" }).Count
         
         if ($WhatIf) {
             Write-ColoredOutput "WhatIf Results: $whatIfCount operations would be performed" $Colors.Info
+            $wouldSkip = ($results | Where-Object { $_.Status -eq "Skipped" }).Count
+            if ($wouldSkip -gt 0) {
+                Write-ColoredOutput "Already have permissions: $wouldSkip reservations" $Colors.Info
+            }
         } else {
-            Write-ColoredOutput "Successful: $successCount" $Colors.Success
+            Write-ColoredOutput "Successfully added: $successCount" $Colors.Success
+            Write-ColoredOutput "Already had permissions: $skippedCount" $Colors.Info
             Write-ColoredOutput "Failed: $failCount" $(if ($failCount -gt 0) { $Colors.Error } else { $Colors.Success })
+        }
+        
+        # Show skipped operations (already have permissions)
+        if ($skippedCount -gt 0 -and -not $WhatIf) {
+            Write-Host ""
+            Write-ColoredOutput "Reservations where $($principal.displayName) already has Owner permissions:" $Colors.Info
+            $results | Where-Object { $_.Status -eq "Skipped" } | ForEach-Object {
+                Write-ColoredOutput "  • $($_.ReservationName)" $Colors.Info
+            }
         }
         
         # Show failed operations
