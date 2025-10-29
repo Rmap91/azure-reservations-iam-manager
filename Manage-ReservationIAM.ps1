@@ -387,6 +387,8 @@ function Export-ReservationDataToCsv {
         return $null
     }
 }
+
+function Write-Header {
     param([string]$Title)
     Write-Host ""
     Write-ColoredOutput ("=" * 80) $Colors.Header
