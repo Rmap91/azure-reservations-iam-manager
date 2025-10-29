@@ -20,15 +20,19 @@ This enhanced script performs the following operations in sequence:
 
 ## Features
 
-- ✅ **Comprehensive Analytics**: Detailed reservation usage and cost optimization insights
+- ✅ **Status Tracking**: Real-time reservation status monitoring (Active, Expired, Expiring Soon, Expiring)
+- ✅ **Comprehensive Analytics**: Detailed reservation usage and cost optimization insights with 1,315 lines of code
+- ✅ **Multi-File CSV Export**: Generate 4 specialized CSV files for offline analysis and reporting
+- ✅ **Cloud Shell Integration**: Built-in download commands for easy file retrieval
 - ✅ **Resource Discovery**: Automatically finds resources affected by each reservation
 - ✅ **Usage Monitoring**: 7-day utilization statistics with optimization recommendations
-- ✅ **Expiry Tracking**: Proactive alerts for reservations nearing expiration
+- ✅ **Expiry Tracking**: Proactive alerts for reservations nearing expiration (30/90 day warnings)
 - ✅ **Full IAM Coverage**: Works with all reservations across accessible subscriptions
 - ✅ **User Validation**: Validates user/group existence before making changes
 - ✅ **Detailed Reporting**: Color-coded output with clear success/failure indicators
 - ✅ **Error Handling**: Robust error handling with detailed error messages
 - ✅ **Interactive Prompts**: User-friendly prompts with confirmation steps
+- ✅ **Help System**: Comprehensive help documentation with examples and usage patterns
 - ✅ **Report-Only Mode**: Option to run detailed analytics without IAM changes
 
 ## Prerequisites
@@ -93,6 +97,44 @@ Analytics and insights without IAM changes:
 - Usage statistics and optimization recommendations
 - Resource discovery and mapping
 - Expiry tracking and renewal alerts
+
+#### CSV Export Mode
+Export comprehensive data for offline analysis:
+- Generate 4 specialized CSV files
+- Status tracking and utilization metrics
+- Resource mapping and IAM permissions
+- Cloud Shell download integration
+
+### CSV Export Feature
+
+The script can export comprehensive reservation data to CSV files for offline analysis and reporting:
+
+#### Available CSV Files
+1. **reservations_summary.csv** - Core reservation details with status information
+2. **reservations_utilization.csv** - Usage statistics and optimization recommendations  
+3. **reservations_resources.csv** - Affected resources mapping and details
+4. **reservations_iam.csv** - Complete IAM permissions matrix
+
+#### Export Usage Examples
+```powershell
+# Generate report with CSV export
+./Manage-ReservationIAM.ps1 -ReportOnly -ExportCsv
+
+# Full IAM management with CSV export
+./Manage-ReservationIAM.ps1 -ExportCsv
+
+# Export to custom directory
+./Manage-ReservationIAM.ps1 -ReportOnly -ExportCsv -OutputPath "./my-exports"
+```
+
+#### Downloading Files in Cloud Shell
+```bash
+# Download all CSV files
+download ./exports/reservations_summary.csv
+download ./exports/reservations_utilization.csv
+download ./exports/reservations_resources.csv
+download ./exports/reservations_iam.csv
+```
 
 ### Script Workflow
 

@@ -5,31 +5,47 @@
 
 .DESCRIPTION
     This script performs the following operations:
-    1. Shows detailed reservation information (SKU, usage, affected resources, end dates)
+    1. Shows detailed reservation information (SKU, usage, affected resources, end dates, status)
     2. Retrieves all Azure reservations and checks their IAM permissions
     3. Lists all current Owners for each reservation
     4. Prompts for a user or group to add as Owner across all reservations
     5. Adds Owner permissions to the specified user/group
     6. Displays the updated IAM permissions
+    7. Exports detailed reports to CSV format
 
 .PARAMETER ReportOnly
     When specified, shows only the detailed reservation report without IAM management
+
+.PARAMETER ExportCsv
+    When specified, exports the reservation data to CSV files for download
+
+.PARAMETER OutputPath
+    Specifies the path for CSV export files (default: current directory)
 
 .NOTES
     - This script is designed to run in Azure Cloud Shell
     - Requires appropriate permissions to manage reservations and role assignments
     - Uses Azure CLI commands for reservation and IAM management
+    - CSV files can be downloaded using Cloud Shell download feature
 
 .EXAMPLE
     ./Manage-ReservationIAM.ps1
     
 .EXAMPLE
     ./Manage-ReservationIAM.ps1 -ReportOnly
+
+.EXAMPLE
+    ./Manage-ReservationIAM.ps1 -ReportOnly -ExportCsv
+
+.EXAMPLE
+    ./Manage-ReservationIAM.ps1 -ExportCsv -OutputPath "./reports"
 #>
 
 [CmdletBinding()]
 param(
-    [switch]$ReportOnly
+    [switch]$ReportOnly,
+    [switch]$ExportCsv,
+    [string]$OutputPath = "."
 )
 
 # Set error action preference
@@ -44,6 +60,71 @@ $Colors = @{
     Header  = "Magenta"
 }
 
+# Show comprehensive help information
+function Show-Help {
+    Write-Host ""
+    Write-Host "Azure Reservations IAM Management Script" -ForegroundColor Cyan
+    Write-Host "=========================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "DESCRIPTION:" -ForegroundColor Yellow
+    Write-Host "  Comprehensive Azure Cloud Shell script for managing IAM permissions across"
+    Write-Host "  Azure reservations with detailed analytics, status tracking, and CSV export."
+    Write-Host ""
+    Write-Host "USAGE:" -ForegroundColor Yellow
+    Write-Host "  ./Manage-ReservationIAM.ps1 [OPTIONS]"
+    Write-Host ""
+    Write-Host "OPTIONS:" -ForegroundColor Yellow
+    Write-Host "  -ReportOnly          Generate detailed report without IAM changes"
+    Write-Host "  -NewOwnerEmail       Email of user/group to add as Owner"
+    Write-Host "  -ExportCsv           Export all data to CSV files"
+    Write-Host "  -OutputPath          Directory for CSV exports (default: ./exports)"
+    Write-Host "  -WhatIf              Show what would be done without making changes"
+    Write-Host "  -Help                Show this help message"
+    Write-Host ""
+    Write-Host "EXAMPLES:" -ForegroundColor Yellow
+    Write-Host "  # Generate detailed report with CSV export"
+    Write-Host "  ./Manage-ReservationIAM.ps1 -ReportOnly -ExportCsv"
+    Write-Host ""
+    Write-Host "  # Add new owner to all reservations"
+    Write-Host "  ./Manage-ReservationIAM.ps1 -NewOwnerEmail 'user@domain.com'"
+    Write-Host ""
+    Write-Host "  # Full IAM management with CSV export"
+    Write-Host "  ./Manage-ReservationIAM.ps1 -ExportCsv -OutputPath './my-exports'"
+    Write-Host ""
+    Write-Host "  # Preview changes without applying them"
+    Write-Host "  ./Manage-ReservationIAM.ps1 -WhatIf"
+    Write-Host ""
+    Write-Host "FEATURES:" -ForegroundColor Yellow
+    Write-Host "  ✓ Reservation status tracking (Active, Expired, Expiring Soon, etc.)"
+    Write-Host "  ✓ Comprehensive utilization analysis with recommendations"
+    Write-Host "  ✓ Affected resources discovery and mapping"
+    Write-Host "  ✓ Multi-file CSV export for offline analysis"
+    Write-Host "  ✓ Color-coded output for easy identification"
+    Write-Host "  ✓ Cloud Shell download integration"
+    Write-Host "  ✓ Detailed error handling and logging"
+    Write-Host ""
+    Write-Host "CSV EXPORT FILES:" -ForegroundColor Yellow
+    Write-Host "  - reservations_summary.csv     : Core reservation details with status"
+    Write-Host "  - reservations_utilization.csv : Usage statistics and recommendations"
+    Write-Host "  - reservations_resources.csv   : Affected resources mapping"
+    Write-Host "  - reservations_iam.csv         : IAM permissions and assignments"
+    Write-Host ""
+    Write-Host "DOWNLOAD IN CLOUD SHELL:" -ForegroundColor Yellow
+    Write-Host "  download ./exports/reservations_summary.csv"
+    Write-Host "  download ./exports/reservations_utilization.csv"
+    Write-Host "  download ./exports/reservations_resources.csv"
+    Write-Host "  download ./exports/reservations_iam.csv"
+    Write-Host ""
+    Write-Host "PREREQUISITES:" -ForegroundColor Yellow
+    Write-Host "  ✓ Azure Cloud Shell (PowerShell)"
+    Write-Host "  ✓ Azure CLI installed and configured"
+    Write-Host "  ✓ Appropriate Azure permissions (Reader on subscriptions, Owner on reservations)"
+    Write-Host ""
+    Write-Host "For more information, visit:"
+    Write-Host "https://github.com/Rmap91/azure-reservations-iam-manager" -ForegroundColor Cyan
+    Write-Host ""
+}
+
 function Write-ColoredOutput {
     param(
         [string]$Message,
@@ -52,7 +133,260 @@ function Write-ColoredOutput {
     Write-Host $Message -ForegroundColor $Color
 }
 
-function Write-Header {
+function Get-ReservationStatus {
+    <#
+    .SYNOPSIS
+    Determines the current status of a reservation based on dates and provisioning state
+    #>
+    param(
+        [object]$Reservation
+    )
+    
+    try {
+        $currentDate = Get-Date
+        $status = "Unknown"
+        $statusColor = $Colors.Warning
+        $daysInfo = ""
+        
+        # Check provisioning state first
+        if ($Reservation.properties.provisioningState) {
+            $provisioningState = $Reservation.properties.provisioningState
+        } elseif ($Reservation.provisioningState) {
+            $provisioningState = $Reservation.provisioningState
+        } else {
+            $provisioningState = "Unknown"
+        }
+        
+        # Parse dates
+        $effectiveDate = $null
+        $expiryDate = $null
+        
+        if ($Reservation.properties.effectiveDateTime -or $Reservation.effectiveDateTime) {
+            $effectiveDateStr = $Reservation.properties.effectiveDateTime ?? $Reservation.effectiveDateTime
+            try { $effectiveDate = [DateTime]::Parse($effectiveDateStr) } catch { }
+        }
+        
+        if ($Reservation.properties.expiryDateTime -or $Reservation.expiryDateTime) {
+            $expiryDateStr = $Reservation.properties.expiryDateTime ?? $Reservation.expiryDateTime
+            try { $expiryDate = [DateTime]::Parse($expiryDateStr) } catch { }
+        }
+        
+        # Determine status based on dates and provisioning state
+        if ($provisioningState -eq "Failed" -or $provisioningState -eq "Cancelled") {
+            $status = $provisioningState
+            $statusColor = $Colors.Error
+        }
+        elseif ($provisioningState -eq "Pending" -or $provisioningState -eq "PendingResourceHold") {
+            $status = "Pending"
+            $statusColor = $Colors.Warning
+        }
+        elseif ($expiryDate) {
+            $daysUntilExpiry = ($expiryDate - $currentDate).Days
+            
+            if ($daysUntilExpiry -lt 0) {
+                $status = "Expired"
+                $statusColor = $Colors.Error
+                $daysInfo = "Expired $([Math]::Abs($daysUntilExpiry)) days ago"
+            }
+            elseif ($daysUntilExpiry -eq 0) {
+                $status = "Expires Today"
+                $statusColor = $Colors.Error
+                $daysInfo = "Expires today!"
+            }
+            elseif ($daysUntilExpiry -le 30) {
+                $status = "Expiring Soon"
+                $statusColor = $Colors.Error
+                $daysInfo = "Expires in $daysUntilExpiry days"
+            }
+            elseif ($daysUntilExpiry -le 90) {
+                $status = "Expiring"
+                $statusColor = $Colors.Warning
+                $daysInfo = "Expires in $daysUntilExpiry days"
+            }
+            else {
+                $status = "Active"
+                $statusColor = $Colors.Success
+                $daysInfo = "Expires in $daysUntilExpiry days"
+            }
+        }
+        elseif ($effectiveDate -and $effectiveDate -gt $currentDate) {
+            $daysUntilStart = ($effectiveDate - $currentDate).Days
+            $status = "Future"
+            $statusColor = $Colors.Info
+            $daysInfo = "Starts in $daysUntilStart days"
+        }
+        elseif ($provisioningState -eq "Succeeded") {
+            $status = "Active"
+            $statusColor = $Colors.Success
+            $daysInfo = "No expiry date available"
+        }
+        else {
+            $status = $provisioningState
+            $statusColor = $Colors.Info
+        }
+        
+        return [PSCustomObject]@{
+            Status = $status
+            StatusColor = $statusColor
+            DaysInfo = $daysInfo
+            ProvisioningState = $provisioningState
+            EffectiveDate = $effectiveDate
+            ExpiryDate = $expiryDate
+        }
+    }
+    catch {
+        return [PSCustomObject]@{
+            Status = "Error"
+            StatusColor = $Colors.Error
+            DaysInfo = "Could not determine status"
+            ProvisioningState = "Unknown"
+            EffectiveDate = $null
+            ExpiryDate = $null
+        }
+    }
+}
+
+function Export-ReservationDataToCsv {
+    <#
+    .SYNOPSIS
+    Exports reservation data to CSV files for download
+    #>
+    param(
+        [array]$DetailedReservations,
+        [array]$OwnerData,
+        [string]$OutputPath = "."
+    )
+    
+    try {
+        # Ensure output directory exists
+        if (!(Test-Path $OutputPath)) {
+            New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+        }
+        
+        $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+        
+        # Export 1: Reservation Summary CSV
+        Write-ColoredOutput "Exporting reservation summary to CSV..." $Colors.Info
+        
+        $reservationSummary = $DetailedReservations | ForEach-Object {
+            $statusInfo = Get-ReservationStatus -Reservation $_
+            
+            [PSCustomObject]@{
+                Name = $_.Name
+                SKU = $_.SKU
+                ResourceType = $_.ResourceType
+                Quantity = $_.Quantity
+                Term = $_.Term
+                Status = $statusInfo.Status
+                DaysInfo = $statusInfo.DaysInfo
+                ProvisioningState = $statusInfo.ProvisioningState
+                EffectiveDate = if ($statusInfo.EffectiveDate) { $statusInfo.EffectiveDate.ToString("yyyy-MM-dd") } else { "N/A" }
+                ExpiryDate = if ($statusInfo.ExpiryDate) { $statusInfo.ExpiryDate.ToString("yyyy-MM-dd") } else { "N/A" }
+                InstanceFlexibility = $_.InstanceFlexibility
+                AvgUtilization = if ($_.UtilizationSummary) { "$($_.UtilizationSummary.AverageUtilization)%" } else { "No data" }
+                MaxUtilization = if ($_.UtilizationSummary) { "$($_.UtilizationSummary.MaxUtilization)%" } else { "No data" }
+                MinUtilization = if ($_.UtilizationSummary) { "$($_.UtilizationSummary.MinUtilization)%" } else { "No data" }
+                ReservationId = $_.Id
+                OrderName = $_.orderName
+            }
+        }
+        
+        $summaryFile = Join-Path $OutputPath "reservation-summary_$timestamp.csv"
+        $reservationSummary | Export-Csv -Path $summaryFile -NoTypeInformation -Encoding UTF8
+        Write-ColoredOutput "  ✓ Saved: $summaryFile" $Colors.Success
+        
+        # Export 2: Detailed Reservation Data CSV
+        Write-ColoredOutput "Exporting detailed reservation data to CSV..." $Colors.Info
+        
+        $detailedData = $DetailedReservations | ForEach-Object {
+            $statusInfo = Get-ReservationStatus -Reservation $_
+            $affectedResourcesText = if ($_.AffectedResources) { ($_.AffectedResources -join "; ") } else { "No resources found" }
+            
+            [PSCustomObject]@{
+                Name = $_.Name
+                ReservationId = $_.Id
+                OrderName = $_.orderName
+                OrderDisplayName = $_.orderDisplayName
+                SKU = $_.SKU
+                ResourceType = $_.ResourceType
+                Quantity = $_.Quantity
+                Term = $_.Term
+                Status = $statusInfo.Status
+                DaysInfo = $statusInfo.DaysInfo
+                ProvisioningState = $statusInfo.ProvisioningState
+                InstanceFlexibility = $_.InstanceFlexibility
+                EffectiveDate = if ($statusInfo.EffectiveDate) { $statusInfo.EffectiveDate.ToString("yyyy-MM-dd HH:mm:ss") } else { "N/A" }
+                ExpiryDate = if ($statusInfo.ExpiryDate) { $statusInfo.ExpiryDate.ToString("yyyy-MM-dd HH:mm:ss") } else { "N/A" }
+                AvgUtilization = if ($_.UtilizationSummary) { $_.UtilizationSummary.AverageUtilization } else { "N/A" }
+                MaxUtilization = if ($_.UtilizationSummary) { $_.UtilizationSummary.MaxUtilization } else { "N/A" }
+                MinUtilization = if ($_.UtilizationSummary) { $_.UtilizationSummary.MinUtilization } else { "N/A" }
+                UtilizationDataPoints = if ($_.UtilizationSummary) { $_.UtilizationSummary.DataPoints } else { 0 }
+                AffectedResources = $affectedResourcesText
+            }
+        }
+        
+        $detailedFile = Join-Path $OutputPath "reservation-details_$timestamp.csv"
+        $detailedData | Export-Csv -Path $detailedFile -NoTypeInformation -Encoding UTF8
+        Write-ColoredOutput "  ✓ Saved: $detailedFile" $Colors.Success
+        
+        # Export 3: IAM Owners CSV (if data available)
+        if ($OwnerData -and $OwnerData.Count -gt 0) {
+            Write-ColoredOutput "Exporting IAM owners data to CSV..." $Colors.Info
+            
+            $ownersFile = Join-Path $OutputPath "reservation-owners_$timestamp.csv"
+            $OwnerData | Export-Csv -Path $ownersFile -NoTypeInformation -Encoding UTF8
+            Write-ColoredOutput "  ✓ Saved: $ownersFile" $Colors.Success
+        }
+        
+        # Export 4: Status Summary CSV
+        Write-ColoredOutput "Exporting status summary to CSV..." $Colors.Info
+        
+        $statusSummary = $DetailedReservations | ForEach-Object {
+            $statusInfo = Get-ReservationStatus -Reservation $_
+            $statusInfo
+        } | Group-Object -Property Status | ForEach-Object {
+            [PSCustomObject]@{
+                Status = $_.Name
+                Count = $_.Count
+                Reservations = ($_.Group | ForEach-Object { 
+                    $reservation = $DetailedReservations | Where-Object { (Get-ReservationStatus -Reservation $_).Status -eq $_.Status } | Select-Object -First 1
+                    $reservation.Name 
+                }) -join "; "
+            }
+        }
+        
+        $statusFile = Join-Path $OutputPath "reservation-status-summary_$timestamp.csv"
+        $statusSummary | Export-Csv -Path $statusFile -NoTypeInformation -Encoding UTF8
+        Write-ColoredOutput "  ✓ Saved: $statusFile" $Colors.Success
+        
+        # Summary of exported files
+        Write-Header "CSV EXPORT COMPLETED"
+        Write-ColoredOutput "Files exported to: $OutputPath" $Colors.Header
+        Write-ColoredOutput "  1. reservation-summary_$timestamp.csv - Overview with key metrics" $Colors.Success
+        Write-ColoredOutput "  2. reservation-details_$timestamp.csv - Complete detailed data" $Colors.Success
+        if ($OwnerData -and $OwnerData.Count -gt 0) {
+            Write-ColoredOutput "  3. reservation-owners_$timestamp.csv - IAM ownership data" $Colors.Success
+        }
+        Write-ColoredOutput "  4. reservation-status-summary_$timestamp.csv - Status breakdown" $Colors.Success
+        Write-Host ""
+        Write-ColoredOutput "To download files in Azure Cloud Shell:" $Colors.Info
+        Write-ColoredOutput "  1. Click the 'Upload/Download files' button (folder icon)" $Colors.Info
+        Write-ColoredOutput "  2. Select 'Download' and choose the CSV files" $Colors.Info
+        Write-ColoredOutput "  3. Or use: code <filename>.csv to view in editor" $Colors.Info
+        
+        return @{
+            SummaryFile = $summaryFile
+            DetailedFile = $detailedFile
+            OwnersFile = if ($OwnerData -and $OwnerData.Count -gt 0) { $ownersFile } else { $null }
+            StatusFile = $statusFile
+            OutputPath = $OutputPath
+        }
+    }
+    catch {
+        Write-ColoredOutput "Error exporting to CSV: $($_.Exception.Message)" $Colors.Error
+        return $null
+    }
+}
     param([string]$Title)
     Write-Host ""
     Write-ColoredOutput ("=" * 80) $Colors.Header
@@ -275,41 +609,39 @@ function Show-DetailedReservationReport {
         }
     }
     
-    # Display summary table
-    Write-Header "RESERVATIONS OVERVIEW"
-    
-    $summaryTable = $detailedReservations | ForEach-Object {
-        $expiryDate = if ($_.ExpiryDate) { 
-            try { 
-                [DateTime]::Parse($_.ExpiryDate).ToString("yyyy-MM-dd") 
-            } catch { 
-                $_.ExpiryDate 
+        # Display summary table
+        Write-Header "RESERVATIONS OVERVIEW"
+        
+        $summaryTable = $detailedReservations | ForEach-Object {
+            $statusInfo = Get-ReservationStatus -Reservation $_
+            
+            $expiryDate = if ($statusInfo.ExpiryDate) { 
+                $statusInfo.ExpiryDate.ToString("yyyy-MM-dd") 
+            } else { 
+                "Unknown" 
             }
-        } else { 
-            "Unknown" 
+            
+            $avgUtilization = if ($_.UtilizationSummary) { 
+                "$($_.UtilizationSummary.AverageUtilization)%" 
+            } else { 
+                "No data" 
+            }
+            
+            [PSCustomObject]@{
+                Name = $_.Name
+                SKU = $_.SKU
+                Type = $_.ResourceType
+                Quantity = $_.Quantity
+                Term = $_.Term
+                Status = $statusInfo.Status
+                "Days Info" = $statusInfo.DaysInfo
+                "Avg Usage (7d)" = $avgUtilization
+                "Expiry Date" = $expiryDate
+                State = $statusInfo.ProvisioningState
+            }
         }
         
-        $avgUtilization = if ($_.UtilizationSummary) { 
-            "$($_.UtilizationSummary.AverageUtilization)%" 
-        } else { 
-            "No data" 
-        }
-        
-        [PSCustomObject]@{
-            Name = $_.Name
-            SKU = $_.SKU
-            Type = $_.ResourceType
-            Quantity = $_.Quantity
-            Term = $_.Term
-            "Avg Usage (7d)" = $avgUtilization
-            "Expiry Date" = $expiryDate
-            State = $_.ProvisioningState
-        }
-    }
-    
-    $summaryTable | Format-Table -AutoSize
-    
-    # Display detailed information for each reservation
+        $summaryTable | Format-Table -AutoSize    # Display detailed information for each reservation
     Write-Header "DETAILED RESERVATION INFORMATION"
     
     foreach ($reservation in $detailedReservations) {
@@ -318,6 +650,9 @@ function Show-DetailedReservationReport {
         Write-ColoredOutput ("-" * 80) $Colors.Header
         Write-Host ""
         
+        # Get status information
+        $statusInfo = Get-ReservationStatus -Reservation $reservation
+        
         # Basic Information
         Write-ColoredOutput "Basic Information:" $Colors.Info
         Write-ColoredOutput "   SKU: $($reservation.SKU)" $Colors.Success
@@ -325,35 +660,42 @@ function Show-DetailedReservationReport {
         Write-ColoredOutput "   Quantity: $($reservation.Quantity)" $Colors.Success
         Write-ColoredOutput "   Term: $($reservation.Term)" $Colors.Success
         Write-ColoredOutput "   Instance Flexibility: $($reservation.InstanceFlexibility)" $Colors.Success
-        Write-ColoredOutput "   Provisioning State: $($reservation.ProvisioningState)" $Colors.Success
+        Write-ColoredOutput "   Provisioning State: $($statusInfo.ProvisioningState)" $Colors.Success
+        Write-Host ""
+        
+        # Status Information
+        Write-ColoredOutput "Reservation Status:" $Colors.Info
+        Write-ColoredOutput "   Current Status: $($statusInfo.Status)" $statusInfo.StatusColor
+        if ($statusInfo.DaysInfo) {
+            Write-ColoredOutput "   Details: $($statusInfo.DaysInfo)" $statusInfo.StatusColor
+        }
         Write-Host ""
         
         # Dates
         Write-ColoredOutput "Important Dates:" $Colors.Info
-        if ($reservation.EffectiveDate) {
-            try {
-                $effectiveDate = [DateTime]::Parse($reservation.EffectiveDate).ToString("yyyy-MM-dd HH:mm UTC")
-                Write-ColoredOutput "   Start Date: $effectiveDate" $Colors.Success
-            } catch {
-                Write-ColoredOutput "   Start Date: $($reservation.EffectiveDate)" $Colors.Success
-            }
+        if ($statusInfo.EffectiveDate) {
+            $effectiveFormatted = $statusInfo.EffectiveDate.ToString("yyyy-MM-dd HH:mm UTC")
+            Write-ColoredOutput "   Start Date: $effectiveFormatted" $Colors.Success
         }
         
-        if ($reservation.ExpiryDate) {
-            try {
-                $expiryDate = [DateTime]::Parse($reservation.ExpiryDate)
-                $daysUntilExpiry = ($expiryDate - (Get-Date)).Days
-                $expiryFormatted = $expiryDate.ToString("yyyy-MM-dd HH:mm UTC")
-                
-                $expiryColor = $Colors.Success
-                if ($daysUntilExpiry -lt 30) { $expiryColor = $Colors.Error }
-                elseif ($daysUntilExpiry -lt 90) { $expiryColor = $Colors.Warning }
-                
-                Write-ColoredOutput "   End Date: $expiryFormatted" $expiryColor
+        if ($statusInfo.ExpiryDate) {
+            $expiryFormatted = $statusInfo.ExpiryDate.ToString("yyyy-MM-dd HH:mm UTC")
+            $daysUntilExpiry = ($statusInfo.ExpiryDate - (Get-Date)).Days
+            
+            $expiryColor = $Colors.Success
+            if ($daysUntilExpiry -lt 0) { $expiryColor = $Colors.Error }
+            elseif ($daysUntilExpiry -lt 30) { $expiryColor = $Colors.Error }
+            elseif ($daysUntilExpiry -lt 90) { $expiryColor = $Colors.Warning }
+            
+            Write-ColoredOutput "   End Date: $expiryFormatted" $expiryColor
+            
+            if ($daysUntilExpiry -ge 0) {
                 Write-ColoredOutput "   Days Until Expiry: $daysUntilExpiry days" $expiryColor
-            } catch {
-                Write-ColoredOutput "   End Date: $($reservation.ExpiryDate)" $Colors.Success
+            } else {
+                Write-ColoredOutput "   Days Since Expiry: $([Math]::Abs($daysUntilExpiry)) days" $expiryColor
             }
+        } else {
+            Write-ColoredOutput "   End Date: Not available" $Colors.Warning
         }
         Write-Host ""
         
@@ -405,31 +747,58 @@ function Show-DetailedReservationReport {
     Write-Header "RESERVATIONS SUMMARY STATISTICS"
     
     $totalReservations = $detailedReservations.Count
-    $expiringIn30Days = ($detailedReservations | Where-Object { 
-        try { 
-            $_.ExpiryDate -and ([DateTime]::Parse($_.ExpiryDate) - (Get-Date)).Days -lt 30 
-        } catch { 
-            $false 
-        }
-    }).Count
     
-    $expiringIn90Days = ($detailedReservations | Where-Object { 
-        try { 
-            $_.ExpiryDate -and ([DateTime]::Parse($_.ExpiryDate) - (Get-Date)).Days -lt 90 
-        } catch { 
-            $false 
+    # Get status breakdown
+    $statusCounts = $detailedReservations | ForEach-Object {
+        $statusInfo = Get-ReservationStatus -Reservation $_
+        $statusInfo.Status
+    } | Group-Object | ForEach-Object {
+        [PSCustomObject]@{
+            Status = $_.Name
+            Count = $_.Count
         }
-    }).Count
+    }
+    
+    $expiredCount = ($statusCounts | Where-Object { $_.Status -eq "Expired" }).Count ?? 0
+    $expiringSoonCount = ($statusCounts | Where-Object { $_.Status -eq "Expiring Soon" }).Count ?? 0
+    $expiringCount = ($statusCounts | Where-Object { $_.Status -eq "Expiring" }).Count ?? 0
+    $activeCount = ($statusCounts | Where-Object { $_.Status -eq "Active" }).Count ?? 0
+    $failedCount = ($statusCounts | Where-Object { $_.Status -in @("Failed", "Cancelled") }).Count ?? 0
     
     $lowUtilization = ($detailedReservations | Where-Object { 
-        $_.UtilizationSummary -and $_.UtilizationSummary.AverageUtilization -lt 50 
+        $_.UtilizationSummary -and [string]$_.UtilizationSummary.AverageUtilization -match '^\d+' -and [int]($_.UtilizationSummary.AverageUtilization -replace '[^\d]', '') -lt 50 
     }).Count
     
     Write-ColoredOutput "Summary Statistics:" $Colors.Header
     Write-ColoredOutput "   Total Reservations: $totalReservations" $Colors.Info
-    Write-ColoredOutput "   Expiring in 30 days: $expiringIn30Days" $(if ($expiringIn30Days -gt 0) { $Colors.Warning } else { $Colors.Success })
-    Write-ColoredOutput "   Expiring in 90 days: $expiringIn90Days" $(if ($expiringIn90Days -gt 0) { $Colors.Warning } else { $Colors.Success })
+    Write-Host ""
+    Write-ColoredOutput "Status Breakdown:" $Colors.Header
+    Write-ColoredOutput "   Active: $activeCount" $(if ($activeCount -gt 0) { $Colors.Success } else { $Colors.Info })
+    Write-ColoredOutput "   Expired: $expiredCount" $(if ($expiredCount -gt 0) { $Colors.Error } else { $Colors.Success })
+    Write-ColoredOutput "   Expiring Soon (≤30 days): $expiringSoonCount" $(if ($expiringSoonCount -gt 0) { $Colors.Error } else { $Colors.Success })
+    Write-ColoredOutput "   Expiring (≤90 days): $expiringCount" $(if ($expiringCount -gt 0) { $Colors.Warning } else { $Colors.Success })
+    Write-ColoredOutput "   Failed/Cancelled: $failedCount" $(if ($failedCount -gt 0) { $Colors.Error } else { $Colors.Success })
+    Write-Host ""
+    Write-ColoredOutput "Utilization Analysis:" $Colors.Header
     Write-ColoredOutput "   Low utilization (<50%): $lowUtilization" $(if ($lowUtilization -gt 0) { $Colors.Warning } else { $Colors.Success })
+    
+    # Detailed status breakdown
+    if ($statusCounts.Count -gt 0) {
+        Write-Host ""
+        Write-ColoredOutput "Detailed Status Breakdown:" $Colors.Header
+        $statusCounts | Sort-Object Count -Descending | ForEach-Object {
+            $color = switch ($_.Status) {
+                "Active" { $Colors.Success }
+                "Expired" { $Colors.Error }
+                "Expiring Soon" { $Colors.Error }
+                "Expiring" { $Colors.Warning }
+                "Failed" { $Colors.Error }
+                "Cancelled" { $Colors.Error }
+                default { $Colors.Info }
+            }
+            Write-ColoredOutput "   $($_.Status): $($_.Count)" $color
+        }
+    }
     
     return $detailedReservations
 }
@@ -845,6 +1214,12 @@ function Show-UpdatedPermissions {
 # Main script execution
 function Main {
     try {
+        # Handle help parameter
+        if ($Help) {
+            Show-Help
+            return
+        }
+        
         if ($ReportOnly) {
             Write-Header "AZURE RESERVATIONS DETAILED REPORT"
             
@@ -879,9 +1254,38 @@ function Main {
         # Step 2: Show detailed reservation report
         $detailedReservations = Show-DetailedReservationReport -Reservations $reservations
         
+        # Export to CSV if requested
+        if ($ExportCsv) {
+            Write-Header "EXPORTING DATA TO CSV"
+            Write-ColoredOutput "Generating CSV export files..." $Colors.Info
+            $exportResult = Export-ReservationDataToCsv -Reservations $detailedReservations -OutputPath $OutputPath
+            
+            if ($exportResult) {
+                Write-ColoredOutput "CSV export completed successfully!" $Colors.Success
+                Write-ColoredOutput "Files saved to: $OutputPath" $Colors.Info
+                Write-ColoredOutput "Files created:" $Colors.Info
+                Write-ColoredOutput "  - reservations_summary.csv" $Colors.Info
+                Write-ColoredOutput "  - reservations_utilization.csv" $Colors.Info
+                Write-ColoredOutput "  - reservations_resources.csv" $Colors.Info
+                Write-ColoredOutput "  - reservations_iam.csv" $Colors.Info
+                Write-Host ""
+                Write-ColoredOutput "To download files in Cloud Shell, use:" $Colors.Header
+                Write-ColoredOutput "  download $OutputPath/reservations_summary.csv" $Colors.Info
+                Write-ColoredOutput "  download $OutputPath/reservations_utilization.csv" $Colors.Info
+                Write-ColoredOutput "  download $OutputPath/reservations_resources.csv" $Colors.Info
+                Write-ColoredOutput "  download $OutputPath/reservations_iam.csv" $Colors.Info
+            } else {
+                Write-ColoredOutput "CSV export failed. Check error messages above." $Colors.Error
+            }
+            Write-Host ""
+        }
+        
         if ($ReportOnly) {
             Write-Header "REPORT COMPLETED"
             Write-ColoredOutput "Detailed reservation report has been generated successfully!" $Colors.Success
+            if ($ExportCsv) {
+                Write-ColoredOutput "CSV export files are ready for download." $Colors.Success
+            }
             Write-ColoredOutput "To manage IAM permissions, run the script without the -ReportOnly parameter." $Colors.Info
             return
         }
@@ -905,8 +1309,26 @@ function Main {
         Start-Sleep -Seconds 2  # Brief pause to allow role assignments to propagate
         Show-UpdatedPermissions -Reservations $reservations
         
+        # Export to CSV after all operations if requested
+        if ($ExportCsv) {
+            Write-Header "EXPORTING UPDATED DATA TO CSV"
+            Write-ColoredOutput "Generating CSV export files with updated IAM information..." $Colors.Info
+            $exportResult = Export-ReservationDataToCsv -Reservations $detailedReservations -OutputPath $OutputPath
+            
+            if ($exportResult) {
+                Write-ColoredOutput "CSV export completed successfully!" $Colors.Success
+                Write-ColoredOutput "Files include updated IAM information after management operations." $Colors.Info
+                Write-Host ""
+            } else {
+                Write-ColoredOutput "CSV export failed. Check error messages above." $Colors.Error
+            }
+        }
+        
         Write-Header "SCRIPT EXECUTION COMPLETED"
         Write-ColoredOutput "All operations have been completed successfully!" $Colors.Success
+        if ($ExportCsv) {
+            Write-ColoredOutput "CSV files are ready for download from: $OutputPath" $Colors.Success
+        }
         
     }
     catch {
